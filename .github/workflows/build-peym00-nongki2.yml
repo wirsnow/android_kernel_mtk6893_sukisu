@@ -3,22 +3,27 @@ name: Build OPPO K9 Pro PEYM00 (NonGKI v2)
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-kernel:
     name: OPPO K9 Pro / ColorOS 13 / Linux 4.19
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
     env:
-      # OPPO K9 Pro (PEYM00), MT6893, ColorOS 13 / Android 13
       DEVICE_NAME: "oppo_k9pro_cn"
       DEVICE_CODENAME: "peym00"
 
-      # Keep the toolchain used by the existing working kernel workflow.
       CUSTOM_CMDS: "CLANG_TRIPLE=aarch64-linux-gnu-"
       EXTRA_CMDS: "LD=ld.lld"
 
+      # OPPO K9 Pro MT6893 kernel
       KERNEL_SOURCE: "https://github.com/wirsnow/android_kernel_mtk6893_sukisu.git"
       KERNEL_BRANCH: "sukisu-dev"
 
+      # Keep the toolchains from the existing working build
       CLANG_SOURCE: "https://github.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-6443078.git"
       CLANG_BRANCH: "10.0"
 
@@ -33,14 +38,15 @@ jobs:
       DEFCONFIG_ORIGIN_IMAGE: ""
       DEFCONFIG_FROM_BOOT: "false"
 
+      # Install SukiSU using the framework's built-in setup
       KERNELSU_SOURCE: ""
       KERNELSU_BRANCH: ""
       KERNELSU_AUTO_GET: "true"
       KERNELSU_AUTO_FORK: "sukisu"
       KERNELSU_METHOD: "shell"
 
-      # The source branch already contains SUSFS v1.5.7. Keep it enabled;
-      # do not stack the framework's generic SUSFS v2.2 patch on top of it.
+      # The selected kernel source contains SUSFS v1.5.7 integration.
+      # Do not run the framework's generic SUSFS v2.2 patch action.
       SUSFS_ENABLE: "true"
       SUSFS_FIXED: "false"
 
@@ -66,7 +72,7 @@ jobs:
       NOMOUNT_ENABLE: "false"
       HOOK_METHOD: "syscall"
 
-      # Start conservatively: no KPM / inline-hook patching for this first build.
+      # Conservative initial build: disable experimental KPM hooks
       KPM_ENABLE: "false"
       KPM_INLINE: "false"
       KPM_KPATCH_NEXT: "false"
@@ -84,55 +90,92 @@ jobs:
       FREE_MORE_SPACE: "false"
 
     steps:
-      # This workflow lives in the kernel repo, but uses the reusable build
-      # components from NonGKI_Kernel_Build_2nd.
-      - name: Checkout NonGKI Kernel Build v2 framework
+      # Check out the NonGKI v2 framework into the workspace root.
+      # Its composite actions are called through local paths below.
+      - name: Checkout NonGKI Kernel Build v2
         uses: actions/checkout@v4
         with:
           repository: JackA1ltman/NonGKI_Kernel_Build_2nd
           ref: c8aa2399d72135bf66e241eed0c456c221901c83
           persist-credentials: false
 
-      # The framework normally strips SUSFS before applying its generic v2.2
-      # patch. This source already has a working v1.5.7 integration, so replace
-      # that cleanup script for this job: remove only stale KernelSU folders.
-      - name: Preserve source-integrated SUSFS v1.5.7
+      # Keep the kernel's existing SUSFS source; remove only old KernelSU
+      # directories before the framework installs SukiSU.
+      - name: Preserve existing SUSFS v1.5.7 integration
         shell: bash
         run: |
+          set -euo pipefail
+
+          test -d Bin
+          test -d Patches
+
           cat > Bin/clean_hook.sh <<'SH'
           #!/usr/bin/env bash
-          set -e
-          rm -rf drivers/kernelsu KernelSU KernelSU-Next
+          set -euo pipefail
+
+          rm -rf drivers/kernelsu
+          rm -rf KernelSU
+          rm -rf KernelSU-Next
+
           rm -f clean_hook.sh
           SH
+
           chmod +x Bin/clean_hook.sh
 
       - name: Prepare compilation environment
-        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/build-env@c8aa2399d72135bf66e241eed0c456c221901c83
+        uses: ./.github/workflows/build-env
 
-      - name: Get kernel, toolchains, and SukiSU
-        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/build-ready@c8aa2399d72135bf66e241eed0c456c221901c83
+      # This action downloads the kernel source, toolchains and SukiSU.
+      - name: Get kernel, toolchains and SukiSU
+        uses: ./.github/workflows/build-ready
 
-      - name: Detect existing SUSFS integration and set config
-        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/patch-susfs@c8aa2399d72135bf66e241eed0c456c221901c83
-
-      # This Linux 4.19 tree has its own SukiSU hook patch. Do not run
-      # patch-no-kprobe here: that action selects the framework's newer
-      # SUSFS inline-hook patch when SUSFS_ENABLE=true.
-      - name: Apply PEYM00 SukiSU hooks for Linux 4.19
+      # Apply the Linux 4.19 hook patch already present in your kernel repo.
+      - name: Apply PEYM00 SukiSU hooks
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/device_kernel"
+
           test -f ksu_hooks_sukisu_4.19.patch
+
           patch --dry-run -p1 < ksu_hooks_sukisu_4.19.patch
           patch -p1 < ksu_hooks_sukisu_4.19.patch
 
+      # Enable the SUSFS options without applying a second SUSFS core patch.
+      - name: Enable SUSFS v1.5.7 configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/device_kernel"
+
+          CFG="arch/arm64/configs/${DEFCONFIG_NAME}"
+          test -f "$CFG"
+          test -f fs/susfs.c
+          grep -q 'SUSFS_VERSION "v1.5.7"' include/linux/susfs.h
+
+          cat >> "$CFG" <<'EOF'
+
+          # SUSFS v1.5.7 configuration for OPPO K9 Pro
+          CONFIG_KSU=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          EOF
+
+          echo "SUSFS v1.5.7 checks passed; configuration appended."
+
       - name: Build kernel
-        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/build-process@c8aa2399d72135bf66e241eed0c456c221901c83
+        uses: ./.github/workflows/build-process
 
       - name: Pack AnyKernel3
-        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/pack-process@c8aa2399d72135bf66e241eed0c456c221901c83
+        uses: ./.github/workflows/pack-process
 
       - name: Upload kernel package
-        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/upload-files@c8aa2399d72135bf66e241eed0c456c221901c83
+        uses: ./.github/workflows/upload-files
