@@ -192,21 +192,20 @@ jobs:
 
           echo "SukiSU ARM64 arch.h restored and verified."
 
-      - name: Fix SukiSU KPM compatibility for Linux 4.19
+      - name: Fix SukiSU KPM access_ok for Linux 4.19
         shell: bash
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/device_kernel"
 
-          FILE="drivers/kernelsu/kpm/kpm.c"
-          test -f "$FILE"
+          KPM_C="$GITHUB_WORKSPACE/device_kernel/drivers/kernelsu/kpm/kpm.c"
+          test -f "$KPM_C"
 
-          python3 - "$FILE" <<'PY'
-          from pathlib import Path
+          python3 - "$KPM_C" <<'PY'
           import sys
+          from pathlib import Path
 
           path = Path(sys.argv[1])
-          source = path.read_text()
+          text = path.read_text()
 
           replacements = [
               (
@@ -221,8 +220,7 @@ jobs:
               ),
               (
                   "access_ok(arg1, sizeof(kernel_name_buffer))",
-                  "access_ok(VERIFY_READ, (void __user *)arg1, "
-                  "sizeof(kernel_name_buffer))",
+                  "access_ok(VERIFY_READ, (void __user *)arg1, sizeof(kernel_name_buffer))",
                   2,
               ),
               (
@@ -231,58 +229,74 @@ jobs:
                   1,
               ),
               (
+                  # The LIST output buffer is arg1; arg2 is its length.
                   "access_ok(arg2, len)",
                   "access_ok(VERIFY_WRITE, (void __user *)arg1, len)",
                   1,
               ),
               (
                   "access_ok(arg1, sizeof(kpm_name))",
-                  "access_ok(VERIFY_READ, (void __user *)arg1, "
-                  "sizeof(kpm_name))",
+                  "access_ok(VERIFY_READ, (void __user *)arg1, sizeof(kpm_name))",
                   1,
               ),
               (
                   "access_ok(arg2, sizeof(kpm_args))",
-                  "access_ok(VERIFY_READ, (void __user *)arg2, "
-                  "sizeof(kpm_args))",
-                  1,
-              ),
-              (
-                  "if (!access_ok(cmd.control_code, sizeof(int))) {",
-                  "if (!sukisu_is_kpm_control_code(cmd.control_code)) {",
-                  1,
-              ),
-              (
-                  "access_ok(cmd.result_code, sizeof(int))",
-                  "access_ok(VERIFY_WRITE, "
-                  "(void __user *)cmd.result_code, sizeof(int))",
+                  "access_ok(VERIFY_READ, (void __user *)arg2, sizeof(kpm_args))",
                   1,
               ),
           ]
 
           for old, new, expected in replacements:
-              count = source.count(old)
+              count = text.count(old)
               if count != expected:
                   raise SystemExit(
-                      f"Unexpected KPM source: {old!r}; "
-                      f"expected {expected} occurrence(s), found {count}"
+                      f"Unexpected count for {old!r}: "
+                      f"expected {expected}, got {count}"
                   )
-              source = source.replace(old, new)
+              text = text.replace(old, new)
 
-          path.write_text(source)
-          print("KPM Linux 4.19 access_ok compatibility patch applied.")
+          old_control = r'''    if (!access_ok(cmd.control_code, sizeof(int))) {
+                  pr_err("kpm: invalid control_code pointer %px\n",
+                         (void *)cmd.control_code);
+                  return -EFAULT;
+              }'''
+          new_control = r'''    if (!sukisu_is_kpm_control_code(cmd.control_code)) {
+                  pr_err("kpm: invalid control code %lu\n",
+                         (unsigned long)cmd.control_code);
+                  return -EINVAL;
+              }'''
 
-          for stale in (
-              "access_ok(arg1, 255)",
-              "access_ok(arg2, 255)",
-              "access_ok(arg2, len)",
-              "access_ok(cmd.control_code, sizeof(int))",
-          ):
-              if stale in source:
-                  raise SystemExit(f"Unpatched KPM expression remains: {stale}")
+          if text.count(old_control) != 1:
+              raise SystemExit("Could not uniquely find the KPM control-code check.")
+          text = text.replace(old_control, new_control)
 
-          print("KPM compatibility checks passed.")
+          old_result = r'''    if (!access_ok(cmd.result_code, sizeof(int))) {
+                  pr_err("kpm: invalid result_code pointer %px\n",
+                         (void *)cmd.result_code);
+                  return -EFAULT;
+              }'''
+          new_result = r'''    if (!access_ok(VERIFY_WRITE,
+                         (void __user *)cmd.result_code, sizeof(int))) {
+                  pr_err("kpm: invalid result_code pointer %px\n",
+                         (void *)cmd.result_code);
+                  return -EFAULT;
+              }'''
+
+          if text.count(old_result) != 1:
+              raise SystemExit("Could not uniquely find the KPM result-code check.")
+          text = text.replace(old_result, new_result)
+
+          if "access_ok(arg1," in text or "access_ok(arg2," in text:
+              raise SystemExit("A two-argument access_ok call remains.")
+
+          path.write_text(text)
+          print(f"Patched KPM compatibility in {path}")
           PY
+
+          echo "Verifying KPM compatibility patch..."
+          ! grep -nE 'access_ok\((arg1|arg2|cmd\.control_code|cmd\.result_code),' "$KPM_C"
+          echo "KPM access_ok checks adapted for Linux 4.19."
+  
       # Verify the Linux 4.19 hook patch already present in your kernel repo.
       - name: Verify PEYM00 SukiSU hooks
         shell: bash
@@ -313,6 +327,46 @@ jobs:
           test -f fs/susfs.c
           grep -q 'SUSFS_VERSION "v1.5.7"' include/linux/susfs.h
 
+          # Remove duplicate definitions managed by this step.
+          python3 - "$CFG" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          managed = {
+              "CONFIG_KSU",
+              "CONFIG_KSU_DEBUG",
+              "CONFIG_KSU_SUSFS",
+              "CONFIG_KSU_SUSFS_SUS_PATH",
+              "CONFIG_KSU_SUSFS_SUS_MOUNT",
+              "CONFIG_KSU_SUSFS_SUS_KSTAT",
+              "CONFIG_KSU_SUSFS_SPOOF_UNAME",
+              "CONFIG_KSU_SUSFS_ENABLE_LOG",
+              "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS",
+              "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG",
+              "CONFIG_KSU_SUSFS_OPEN_REDIRECT",
+              "CONFIG_KSU_SUSFS_SUS_MAP",
+              "CONFIG_KPM",
+              "CONFIG_KALLSYMS",
+              "CONFIG_KALLSYMS_ALL",
+          }
+
+          kept = []
+          for line in path.read_text().splitlines():
+              match = re.match(r"^\s*(CONFIG_[A-Z0-9_]+)=", line)
+              if not match:
+                  match = re.match(
+                      r"^\s*#\s*(CONFIG_[A-Z0-9_]+)\s+is not set\s*$",
+                      line,
+                  )
+              if match and match.group(1) in managed:
+                  continue
+              kept.append(line)
+
+          path.write_text("\n".join(kept).rstrip() + "\n")
+          PY
+
           cat >> "$CFG" <<'EOF'
 
           # SukiSU + SUSFS v1.5.7
@@ -329,32 +383,33 @@ jobs:
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
 
-          # Logging is diagnostic, not a hiding feature.
+          # Disable diagnostic logging; this is not a hiding feature.
           # CONFIG_KSU_SUSFS_ENABLE_LOG is not set
 
-          # Keep KPM enabled.
+          # Keep KPM and symbol tables enabled.
           CONFIG_KPM=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
           EOF
 
-          echo "Checking final requested configuration..."
-          grep -nE 'CONFIG_KPM=|CONFIG_KALLSYMS=|CONFIG_KALLSYMS_ALL=|CONFIG_KSU_SUSFS' "$CFG"
+          echo "Checking requested configuration..."
+          grep -nE '^(CONFIG_KPM=|CONFIG_KALLSYMS=|CONFIG_KALLSYMS_ALL=|CONFIG_KSU_SUSFS)' "$CFG"
 
-          grep -q '^CONFIG_KPM=y$' "$CFG"
-          grep -q '^CONFIG_KALLSYMS=y$' "$CFG"
-          grep -q '^CONFIG_KALLSYMS_ALL=y$' "$CFG"
-          grep -q '^CONFIG_KSU_SUSFS=y$' "$CFG"
-          grep -q '^CONFIG_KSU_SUSFS_SUS_PATH=y$' "$CFG"
-          grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y$' "$CFG"
-          grep -q '^CONFIG_KSU_SUSFS_SUS_KSTAT=y$' "$CFG"
-          grep -q '^CONFIG_KSU_SUSFS_SPOOF_UNAME=y$' "$CFG"
-          grep -q '^CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y$' "$CFG"
-          grep -q '^CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y$' "$CFG"
-          grep -q '^CONFIG_KSU_SUSFS_OPEN_REDIRECT=y$' "$CFG"
-          grep -q '^CONFIG_KSU_SUSFS_SUS_MAP=y$'
+          grep -qx 'CONFIG_KPM=y' "$CFG"
+          grep -qx 'CONFIG_KALLSYMS=y' "$CFG"
+          grep -qx 'CONFIG_KALLSYMS_ALL=y' "$CFG"
+          grep -qx 'CONFIG_KSU=y' "$CFG"
+          grep -qx 'CONFIG_KSU_SUSFS=y' "$CFG"
+          grep -qx 'CONFIG_KSU_SUSFS_SUS_PATH=y' "$CFG"
+          grep -qx 'CONFIG_KSU_SUSFS_SUS_MOUNT=y' "$CFG"
+          grep -qx 'CONFIG_KSU_SUSFS_SUS_KSTAT=y' "$CFG"
+          grep -qx 'CONFIG_KSU_SUSFS_SPOOF_UNAME=y' "$CFG"
+          grep -qx 'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y' "$CFG"
+          grep -qx 'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y' "$CFG"
+          grep -qx 'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y' "$CFG"
+          grep -qx 'CONFIG_KSU_SUSFS_SUS_MAP=y' "$CFG"
 
-          echo "SUSFS and KPM configuration checks passed."
+          echo "SUSFS v1.5.7 and KPM configuration checks passed."
 
       - name: Build kernel
         uses: ./.github/workflows/build-process
