@@ -172,6 +172,26 @@ jobs:
       - name: Get kernel, toolchains and SukiSU
         uses: ./.github/workflows/build-ready
 
+      - name: Restore missing SukiSU arch.h
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KSU_DIR="$GITHUB_WORKSPACE/device_kernel/KernelSU/kernel"
+
+          test -f "$KSU_DIR/kernel_includes.h"
+          mkdir -p "$KSU_DIR/include"
+
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/e564e16f99038d0b0cf560bec937c99c92c89481/kernel/include/arch.h" \
+            -o "$KSU_DIR/include/arch.h"
+
+          grep -q 'defined(__aarch64__)' "$KSU_DIR/include/arch.h"
+          grep -q 'REBOOT_SYMBOL "__arm64_sys_reboot"' \
+            "$KSU_DIR/include/arch.h"
+
+          echo "SukiSU ARM64 arch.h restored and verified."
+  
       # Verify the Linux 4.19 hook patch already present in your kernel repo.
       - name: Verify PEYM00 SukiSU hooks
         shell: bash
