@@ -172,17 +172,23 @@ jobs:
       - name: Get kernel, toolchains and SukiSU
         uses: ./.github/workflows/build-ready
 
-      # Apply the Linux 4.19 hook patch already present in your kernel repo.
-      - name: Apply PEYM00 SukiSU hooks
+      # Verify the Linux 4.19 hook patch already present in your kernel repo.
+      - name: Verify PEYM00 SukiSU hooks
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/device_kernel"
 
-          test -f ksu_hooks_sukisu_4.19.patch
+          echo "Checking existing SukiSU hooks..."
 
-          patch --dry-run -p1 < ksu_hooks_sukisu_4.19.patch
-          patch -p1 < ksu_hooks_sukisu_4.19.patch
+          grep -q 'ksu_handle_execveat_sucompat' fs/exec.c
+          grep -q 'ksu_handle_faccessat' fs/open.c
+          grep -q 'ksu_handle_sys_read' fs/read_write.c
+          grep -q 'ksu_handle_stat' fs/stat.c
+          grep -q 'ksu_handle_input_handle_event' drivers/input/input.c
+          grep -q 'ksu_handle_devpts' drivers/tty/pty.c
+
+          echo "All required SukiSU hooks are already present."
 
       # Enable the SUSFS options without applying a second SUSFS core patch.
       - name: Enable SUSFS v1.5.7 configuration
