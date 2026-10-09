@@ -108,13 +108,13 @@ jobs:
           chmod +x Bin/clean_hook.sh
 
       - name: Prepare compilation environment
-        uses: ./.github/workflows/build-env
+        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/build-env@c8aa2399d72135bf66e241eed0c456c221901c83
 
       - name: Get kernel, toolchains, and SukiSU
-        uses: ./.github/workflows/build-ready
+        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/build-ready@c8aa2399d72135bf66e241eed0c456c221901c83
 
       - name: Detect existing SUSFS integration and set config
-        uses: ./.github/workflows/patch-susfs
+        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/patch-susfs@c8aa2399d72135bf66e241eed0c456c221901c83
 
       # This Linux 4.19 tree has its own SukiSU hook patch. Do not run
       # patch-no-kprobe here: that action selects the framework's newer
@@ -129,10 +129,10 @@ jobs:
           patch -p1 < ksu_hooks_sukisu_4.19.patch
 
       - name: Build kernel
-        uses: ./.github/workflows/build-process
+        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/build-process@c8aa2399d72135bf66e241eed0c456c221901c83
 
       - name: Pack AnyKernel3
-        uses: ./.github/workflows/pack-process
+        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/pack-process@c8aa2399d72135bf66e241eed0c456c221901c83
 
       - name: Upload kernel package
-        uses: ./.github/workflows/upload-files
+        uses: JackA1ltman/NonGKI_Kernel_Build_2nd/.github/workflows/upload-files@c8aa2399d72135bf66e241eed0c456c221901c83
