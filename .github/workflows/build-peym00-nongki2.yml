@@ -302,7 +302,7 @@ jobs:
           echo "All required SukiSU hooks are already present."
 
       # Enable the SUSFS options without applying a second SUSFS core patch.
-      - name: Enable SUSFS v1.5.7 configuration
+      - name: Enable SUSFS v1.5.7 and KPM
         shell: bash
         run: |
           set -euo pipefail
@@ -315,21 +315,46 @@ jobs:
 
           cat >> "$CFG" <<'EOF'
 
-          # SUSFS v1.5.7 configuration for OPPO K9 Pro
+          # SukiSU + SUSFS v1.5.7
           CONFIG_KSU=y
+          # CONFIG_KSU_DEBUG is not set
+
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_KSTAT=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
+
+          # Logging is diagnostic, not a hiding feature.
+          # CONFIG_KSU_SUSFS_ENABLE_LOG is not set
+
+          # Keep KPM enabled.
+          CONFIG_KPM=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
           EOF
 
-          echo "SUSFS v1.5.7 checks passed; configuration appended."
+          echo "Checking final requested configuration..."
+          grep -nE 'CONFIG_KPM=|CONFIG_KALLSYMS=|CONFIG_KALLSYMS_ALL=|CONFIG_KSU_SUSFS' "$CFG"
+
+          grep -q '^CONFIG_KPM=y$' "$CFG"
+          grep -q '^CONFIG_KALLSYMS=y$' "$CFG"
+          grep -q '^CONFIG_KALLSYMS_ALL=y$' "$CFG"
+          grep -q '^CONFIG_KSU_SUSFS=y$' "$CFG"
+          grep -q '^CONFIG_KSU_SUSFS_SUS_PATH=y$' "$CFG"
+          grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y$' "$CFG"
+          grep -q '^CONFIG_KSU_SUSFS_SUS_KSTAT=y$' "$CFG"
+          grep -q '^CONFIG_KSU_SUSFS_SPOOF_UNAME=y$' "$CFG"
+          grep -q '^CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y$' "$CFG"
+          grep -q '^CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y$' "$CFG"
+          grep -q '^CONFIG_KSU_SUSFS_OPEN_REDIRECT=y$' "$CFG"
+          grep -q '^CONFIG_KSU_SUSFS_SUS_MAP=y$'
+
+          echo "SUSFS and KPM configuration checks passed."
 
       - name: Build kernel
         uses: ./.github/workflows/build-process
