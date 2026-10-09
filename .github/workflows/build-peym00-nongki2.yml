@@ -125,6 +125,49 @@ jobs:
       - name: Prepare compilation environment
         uses: ./.github/workflows/build-env
 
+      - name: Adapt SukiSU fix patch for builtin branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PATCH_FILE="/tmp/Patches/Patch/sukisu_ultra_fixed.patch"
+          test -f "$PATCH_FILE"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          patch_file = Path("/tmp/Patches/Patch/sukisu_ultra_fixed.patch")
+          lines = patch_file.read_text().splitlines(keepends=True)
+
+          result = []
+          skip_section = False
+          found = False
+
+          for line in lines:
+              if line.startswith("diff --git "):
+                  skip_section = (
+                      line.startswith(
+                          "diff --git a/runtime/ksud.c b/runtime/ksud.c"
+                      )
+                  )
+                  if skip_section:
+                      found = True
+
+              if not skip_section:
+                  result.append(line)
+
+          if not found:
+              raise SystemExit(
+                  "ERROR: runtime/ksud.c section not found in SukiSU patch"
+              )
+
+          patch_file.write_text("".join(result))
+          print(
+              "Removed only the stale runtime/ksud.c patch section; "
+              "all other patch sections are preserved."
+          )
+          PY
+
       # This action downloads the kernel source, toolchains and SukiSU.
       - name: Get kernel, toolchains and SukiSU
         uses: ./.github/workflows/build-ready
