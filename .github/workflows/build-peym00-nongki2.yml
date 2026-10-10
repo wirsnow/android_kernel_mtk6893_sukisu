@@ -975,5 +975,88 @@ jobs:
       - name: Pack AnyKernel3
         uses: ./.github/workflows/pack-process
 
+      - name: Fix AnyKernel3 installer for OPPO K9 Pro PEYM00
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/device_kernel"
+
+          : "${PACK_NAME:?PACK_NAME is not set}"
+
+          ZIP="$GITHUB_WORKSPACE/device_kernel/$PACK_NAME"
+          test -f "$ZIP"
+
+          TMP_DIR="$(mktemp -d)"
+          FIXED="$GITHUB_WORKSPACE/device_kernel/.peym00-fixed.zip"
+          trap 'rm -rf "$TMP_DIR" "$FIXED"' EXIT
+
+          unzip -q "$ZIP" -d "$TMP_DIR"
+
+          python3 - "$TMP_DIR/anykernel.sh" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          # Restrict installation to this phone's device identifiers.
+          names = re.compile(
+              r"(?m)^device\.name1=.*\n"
+              r"(?:^device\.name\d+=.*\n)+"
+          )
+          text, count = names.subn(
+              "device.name1=PEYM00\n"
+              "device.name2=peym00\n",
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("ERROR: cannot replace AnyKernel device names")
+
+          # Enable the device check (the framework disables it by default).
+          text, count = re.subn(
+              r"(?m)^do\.devicecheck=0$",
+              "do.devicecheck=1",
+              text,
+          )
+          if count != 1:
+              raise SystemExit("ERROR: cannot enable device check")
+
+          # Remove the unrelated Galaxy Nexus/tuna ramdisk edits.
+          start = text.find("# init.rc")
+          end = text.find("write_boot;", start)
+
+          if start < 0 or end < 0:
+              raise SystemExit("ERROR: cannot isolate template ramdisk edits")
+
+          text = text[:start] + text[end:]
+
+          if "dump_boot;" not in text or "write_boot;" not in text:
+              raise SystemExit("ERROR: AnyKernel boot install commands missing")
+
+          for bad in ("maguro", "toroplus", "init.tuna.rc", "fstab.tuna"):
+              if bad in text:
+                  raise SystemExit(f"ERROR: unrelated template entry remains: {bad}")
+
+          if "do.devicecheck=1" not in text:
+              raise SystemExit("ERROR: device check verification failed")
+
+          path.write_text(text)
+          print("PEYM00 AnyKernel3 script checks passed.")
+          PY
+
+          test -f "$TMP_DIR/Image.gz-dtb"
+
+          (
+            cd "$TMP_DIR"
+            zip -qr "$FIXED" .
+          )
+
+          unzip -t "$FIXED" >/dev/null
+          mv -f "$FIXED" "$ZIP"
+
+          echo "PEYM00 AnyKernel3 package sanitized and verified."
+
       - name: Upload kernel package
         uses: ./.github/workflows/upload-files
