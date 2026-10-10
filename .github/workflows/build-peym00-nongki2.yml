@@ -595,7 +595,184 @@ jobs:
 
           print("SUSFS STATX KSTAT definitions verified.")
           PY
+          
+      - name: Fix remaining SukiSU SUSFS Linux 4.19 linker symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/device_kernel"
 
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          # 1. SUSFS v2.3.0: add the missing app-UID helper.
+          header = Path("include/linux/susfs_def.h")
+          if not header.is_file():
+              raise SystemExit("ERROR: susfs_def.h not found")
+
+          htext = header.read_text()
+          helper_pattern = re.compile(
+              r"static\s+inline\s+bool\s+susfs_is_current_app_uid\s*\("
+          )
+
+          if not helper_pattern.search(htext):
+              marker = "#endif // #ifndef KSU_SUSFS_DEF_H"
+              pos = htext.rfind(marker)
+
+              if pos < 0:
+                  raise SystemExit(
+                      "ERROR: cannot find SUSFS header closing guard"
+                  )
+
+              helper = (
+                  "\n"
+                  "static inline bool susfs_is_current_app_uid(void)\n"
+                  "{\n"
+                  "#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)\n"
+                  "\treturn ((__kuid_val(current_uid()) % 100000) >= 10000);\n"
+                  "#else\n"
+                  "\treturn ((current_uid().val % 100000) >= 10000);\n"
+                  "#endif\n"
+                  "}\n\n"
+              )
+
+              htext = htext[:pos] + helper + htext[pos:]
+              header.write_text(htext)
+
+          if not helper_pattern.search(header.read_text()):
+              raise SystemExit("ERROR: SUSFS UID helper verification failed")
+
+          # 2. Linux 4.19: backport the inotify mask helper expected by
+          # the SUSFS fdinfo patch. Preserve userspace-visible mask bits.
+          inotify = Path("fs/notify/inotify/inotify.h")
+          if not inotify.is_file():
+              raise SystemExit("ERROR: inotify internal header not found")
+
+          itext = inotify.read_text()
+          mask_helper = re.compile(
+              r"static\s+inline\s+(?:__u32|u32)\s+"
+              r"inotify_mark_user_mask\s*\("
+          )
+
+          if not mask_helper.search(itext):
+              if "inotify_mark_user_mask" in itext:
+                  raise SystemExit(
+                      "ERROR: unexpected inotify_mark_user_mask declaration"
+                  )
+
+              compat = (
+                  "\n"
+                  "/* Linux 4.19 compatibility for SUSFS fdinfo. */\n"
+                  "#ifndef SUSFS_COMPAT_INOTIFY_MARK_USER_MASK\n"
+                  "#define SUSFS_COMPAT_INOTIFY_MARK_USER_MASK\n"
+                  "#ifndef INOTIFY_USER_MASK\n"
+                  "#define INOTIFY_USER_MASK "
+                  "(IN_ALL_EVENTS | IN_ONESHOT | IN_EXCL_UNLINK)\n"
+                  "#endif\n"
+                  "static inline __u32 "
+                  "inotify_mark_user_mask(struct fsnotify_mark *fsn_mark)\n"
+                  "{\n"
+                  "\treturn fsn_mark->mask & INOTIFY_USER_MASK;\n"
+                  "}\n"
+                  "#endif\n"
+              )
+              inotify.write_text(itext.rstrip() + "\n" + compat)
+
+          if not mask_helper.search(inotify.read_text()):
+              raise SystemExit("ERROR: inotify mask helper verification failed")
+
+          # 3. The selected SukiSU branch has a no-op devpts handler.
+          # Remove the old external reference that is unresolved at link time.
+          pty = Path("drivers/tty/pty.c")
+          if not pty.is_file():
+              raise SystemExit("ERROR: drivers/tty/pty.c not found")
+
+          ptext = pty.read_text()
+
+          call_pattern = re.compile(
+              r"(?m)^#ifdef CONFIG_KSU\n"
+              r"[ \t]*ksu_handle_devpts"
+              r"\(\(struct inode \*\)file->f_path\.dentry->d_inode\);\n"
+              r"#endif[ \t]*\n?"
+          )
+
+          decl_pattern = re.compile(
+              r"(?m)^#ifdef CONFIG_KSU\n"
+              r"extern int ksu_handle_devpts\(struct inode\s*\*\);\n"
+              r"#endif[ \t]*\n?"
+          )
+
+          ptext, call_count = call_pattern.subn(
+              "\t/* Legacy SukiSU devpts callback is a no-op. */\n",
+              ptext,
+          )
+
+          if call_count > 1:
+              raise SystemExit(
+                  f"ERROR: unexpected devpts call count: {call_count}"
+              )
+
+          ptext, _ = decl_pattern.subn("", ptext)
+
+          if "ksu_handle_devpts(" in ptext:
+              raise SystemExit("ERROR: unresolved devpts reference remains")
+
+          pty.write_text(ptext)
+
+          # 4. SELinux-hide callbacks are initialized only on kernels
+          # >= 5.10 in the selected SukiSU implementation. Guard their
+          # runtime call sites so Linux 4.19 does not reference absent code.
+          ksud = Path("drivers/kernelsu/runtime/ksud.c")
+          if not ksud.is_file():
+              raise SystemExit("ERROR: SukiSU runtime/ksud.c not found")
+
+          ktext = ksud.read_text()
+          guard_marker = "SUSFS_LEGACY_KERNEL_SELINUX_GUARD"
+
+          if guard_marker not in ktext:
+              symbols = (
+                  "ksu_selinux_hide_handle_second_stage",
+                  "ksu_selinux_hide_handle_post_fs_data",
+              )
+
+              for symbol in symbols:
+                  pattern = re.compile(
+                      r"(?m)^([ \t]*)"
+                      + re.escape(symbol)
+                      + r"\(\);[ \t]*$"
+                  )
+
+                  count = len(pattern.findall(ktext))
+                  if count == 0:
+                      raise SystemExit(
+                          f"ERROR: cannot find runtime call to {symbol}"
+                      )
+
+                  def guarded(match):
+                      indent = match.group(1)
+                      return (
+                          indent
+                          + "#if LINUX_VERSION_CODE >= "
+                            "KERNEL_VERSION(5, 10, 0) "
+                            "/* SUSFS_LEGACY_KERNEL_SELINUX_GUARD */\n"
+                          + indent + symbol + "();\n"
+                          + indent + "#endif\n"
+                      )
+
+                  ktext = pattern.sub(guarded, ktext)
+
+              if "#include <linux/version.h>" not in ktext:
+                  ktext = "#include <linux/version.h>\n" + ktext
+
+              ksud.write_text(ktext)
+
+          if guard_marker not in ksud.read_text():
+              raise SystemExit("ERROR: SELinux compatibility guards missing")
+
+          print("SUSFS/SukiSU Linux 4.19 linker compatibility checks passed.")
+          PY
+          
       # Verify the Linux 4.19 hook patch already present in your kernel repo.
       - name: Verify PEYM00 SukiSU hooks
         shell: bash
