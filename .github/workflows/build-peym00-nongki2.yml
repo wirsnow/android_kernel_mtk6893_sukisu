@@ -480,7 +480,122 @@ jobs:
 
           print("fdinfo.c inotify-only mask compatibility check passed.")
           PY
-          
+
+      - name: Fix SUSFS STATX KSTAT definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/device_kernel"
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          header = Path("include/linux/susfs_def.h")
+          stat = Path("fs/stat.c")
+
+          if not header.is_file():
+              raise SystemExit("ERROR: SUSFS definition header not found")
+          if not stat.is_file():
+              raise SystemExit("ERROR: fs/stat.c not found")
+
+          definitions = (
+              ("STATX_SUS_KSTAT", "0x10000000U"),
+              ("STATX_SUS_KSTAT_FUSE", "0x20000000U"),
+          )
+
+          # Ensure the internal SUSFS flags exist in susfs_def.h.
+          htext = header.read_text()
+
+          for name, value in definitions:
+              pattern = re.compile(
+                  r"(?m)^[ \t]*#define[ \t]+"
+                  + re.escape(name)
+                  + r"[ \t]+([^\s/]+)"
+              )
+              found = pattern.findall(htext)
+
+              if len(found) > 1:
+                  raise SystemExit(
+                      f"ERROR: duplicate {name} definitions"
+                  )
+
+              if found:
+                  if found[0] != value:
+                      raise SystemExit(
+                          f"ERROR: unexpected {name} value: {found[0]}"
+                      )
+                  continue
+
+              closing = list(
+                  re.finditer(r"(?m)^[ \t]*#endif\b.*$", htext)
+              )
+              if not closing:
+                  raise SystemExit(
+                      "ERROR: SUSFS header closing #endif not found"
+                  )
+
+              pos = closing[-1].start()
+              htext = (
+                  htext[:pos]
+                  + f"#define {name} {value}\n"
+                  + htext[pos:]
+              )
+
+          header.write_text(htext)
+
+          # Add guarded fallback definitions directly to fs/stat.c.
+          # This also protects against include/config visibility differences.
+          marker = "#include <asm/unistd.h>"
+          tag = "/* SUSFS STATX fallback definitions for this kernel. */"
+
+          stext = stat.read_text()
+
+          if tag not in stext:
+              if stext.count(marker) != 1:
+                  raise SystemExit(
+                      "ERROR: could not locate fs/stat.c include anchor"
+                  )
+
+              fallback = """
+          /* SUSFS STATX fallback definitions for this kernel. */
+          #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+          #ifndef STATX_SUS_KSTAT
+          #define STATX_SUS_KSTAT 0x10000000U
+          #endif
+          #ifndef STATX_SUS_KSTAT_FUSE
+          #define STATX_SUS_KSTAT_FUSE 0x20000000U
+          #endif
+          #endif
+          """
+
+              pos = stext.index(marker) + len(marker)
+              stext = stext[:pos] + "\n" + fallback + stext[pos:]
+              stat.write_text(stext)
+
+          # Verify the header definitions and fallback block.
+          htext = header.read_text()
+          stext = stat.read_text()
+
+          for name, value in definitions:
+              pattern = re.compile(
+                  r"(?m)^[ \t]*#define[ \t]+"
+                  + re.escape(name)
+                  + r"[ \t]+([^\s/]+)"
+              )
+              if pattern.findall(htext) != [value]:
+                  raise SystemExit(
+                      f"ERROR: {name} verification failed"
+                  )
+
+          if tag not in stext:
+              raise SystemExit(
+                  "ERROR: fs/stat.c fallback block missing"
+              )
+
+          print("SUSFS STATX KSTAT definitions verified.")
+          PY
+
       # Verify the Linux 4.19 hook patch already present in your kernel repo.
       - name: Verify PEYM00 SukiSU hooks
         shell: bash
