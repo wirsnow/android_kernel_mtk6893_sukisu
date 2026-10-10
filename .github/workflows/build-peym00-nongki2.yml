@@ -296,7 +296,89 @@ jobs:
           echo "Verifying KPM compatibility patch..."
           ! grep -nE 'access_ok\((arg1|arg2|cmd\.control_code|cmd\.result_code),' "$KPM_C"
           echo "KPM access_ok checks adapted for Linux 4.19."
-  
+      
+      - name: Upgrade SUSFS core to v2.3.0 for SukiSU
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/device_kernel"
+
+          # Fetch enough history to reverse the two old SUSFS commits.
+          git fetch --depth=40 origin sukisu-dev
+
+          git cat-file -e \
+            f8ed6712823b7535346d8a05e898555b548fc9ac^{commit}
+          git cat-file -e \
+            8816588aef937a14d9af639b1c75450bcdb24f6f^{commit}
+
+          # The old source contains SUSFS v1.5.7.
+          # Deinitialize its old SUSFS submodule before reverting.
+          git submodule deinit -f -- susfs4ksu >/dev/null 2>&1 || true
+          rm -rf susfs4ksu
+
+          # Revert v1.5.7 first, then its original SUSFS integration.
+          git revert --no-commit \
+            f8ed6712823b7535346d8a05e898555b548fc9ac \
+            8816588aef937a14d9af639b1c75450bcdb24f6f
+
+          test ! -e fs/susfs.c
+          test ! -e include/linux/susfs.h
+          test ! -e include/linux/susfs_def.h
+
+          PATCH_BASE="https://raw.githubusercontent.com/lykwzzwzss/pipa-n0-resukisu-build/ef4ed9cacc97e502ae8914bf34e77523b7def42a/patches"
+
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "$PATCH_BASE/susfs-4.19.patch" \
+            -o /tmp/susfs-4.19.patch
+
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "$PATCH_BASE/susfs-inline-hooks.sh" \
+            -o /tmp/susfs-inline-hooks.sh
+
+          # Do not continue if the patch cannot be applied cleanly.
+          if ! patch --batch --forward --fuzz=3 -p1 \
+            < /tmp/susfs-4.19.patch \
+            > /tmp/susfs-4.19-patch.log 2>&1; then
+            cat /tmp/susfs-4.19-patch.log
+            find . -name '*.rej' -print
+            echo "ERROR: SUSFS v2.3.0 patch failed."
+            exit 1
+          fi
+
+          if find . -name '*.rej' -print -quit | grep -q .; then
+            cat /tmp/susfs-4.19-patch.log
+            find . -name '*.rej' -print
+            echo "ERROR: SUSFS patch has rejected hunks."
+            exit 1
+          fi
+
+          # Add the SukiSU/SUSFS hooks appropriate for this kernel.
+          if ! bash /tmp/susfs-inline-hooks.sh \
+            > /tmp/susfs-inline-hooks.log 2>&1; then
+            cat /tmp/susfs-inline-hooks.log
+            exit 1
+          fi
+          cat /tmp/susfs-inline-hooks.log
+
+          # Check that the new implementation matches the SukiSU API.
+          test -f fs/susfs.c
+          grep -q 'SUSFS_VERSION "v2.3.0"' include/linux/susfs.h
+          grep -q 'SUSFS_MAGIC' include/linux/susfs_def.h
+          grep -q 'CMD_SUSFS_ADD_SUS_PATH_LOOP' include/linux/susfs_def.h
+          grep -q 'CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS' include/linux/susfs_def.h
+          grep -q 'CMD_SUSFS_ADD_SUS_MAP' include/linux/susfs_def.h
+          grep -q 'CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING' include/linux/susfs_def.h
+
+          grep -q 'susfs_add_sus_path_loop' include/linux/susfs.h
+          grep -q 'susfs_set_hide_sus_mnts_for_non_su_procs' include/linux/susfs.h
+          grep -q 'susfs_add_sus_map' include/linux/susfs.h
+          grep -q 'susfs_set_avc_log_spoofing' include/linux/susfs.h
+
+          grep -q 'ksu_handle_sys_reboot' kernel/reboot.c
+          grep -q 'ksu_handle_setresuid' kernel/sys.c
+
+          echo "SUSFS v2.3.0 core and SukiSU hooks verified."
+
       # Verify the Linux 4.19 hook patch already present in your kernel repo.
       - name: Verify PEYM00 SukiSU hooks
         shell: bash
@@ -316,7 +398,8 @@ jobs:
           echo "All required SukiSU hooks are already present."
 
       # Enable the SUSFS options without applying a second SUSFS core patch.
-      - name: Enable SUSFS v1.5.7 and KPM
+     
+      - name: Enable SUSFS v2.3.0 and KPM configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -325,51 +408,43 @@ jobs:
           CFG="arch/arm64/configs/${DEFCONFIG_NAME}"
           test -f "$CFG"
           test -f fs/susfs.c
-          grep -q 'SUSFS_VERSION "v1.5.7"' include/linux/susfs.h
+          grep -q 'SUSFS_VERSION "v2.3.0"' include/linux/susfs.h
 
-          # Remove duplicate definitions managed by this step.
+          # Remove stale and duplicate SUSFS/KPM definitions.
           python3 - "$CFG" <<'PY'
           import re
           import sys
           from pathlib import Path
 
           path = Path(sys.argv[1])
-          managed = {
-              "CONFIG_KSU",
-              "CONFIG_KSU_DEBUG",
-              "CONFIG_KSU_SUSFS",
-              "CONFIG_KSU_SUSFS_SUS_PATH",
-              "CONFIG_KSU_SUSFS_SUS_MOUNT",
-              "CONFIG_KSU_SUSFS_SUS_KSTAT",
-              "CONFIG_KSU_SUSFS_SPOOF_UNAME",
-              "CONFIG_KSU_SUSFS_ENABLE_LOG",
-              "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS",
-              "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG",
-              "CONFIG_KSU_SUSFS_OPEN_REDIRECT",
-              "CONFIG_KSU_SUSFS_SUS_MAP",
-              "CONFIG_KPM",
-              "CONFIG_KALLSYMS",
-              "CONFIG_KALLSYMS_ALL",
-          }
+          pattern = re.compile(
+              r"^\s*(?:"
+              r"CONFIG_KSU(?:_DEBUG)?|"
+              r"CONFIG_KPM|"
+              r"CONFIG_KALLSYMS(?:_ALL)?|"
+              r"CONFIG_KSU_SUSFS(?:_[A-Z0-9_]+)?"
+              r")\s*="
+          )
+          not_set = re.compile(
+              r"^\s*#\s*(?:"
+              r"CONFIG_KSU(?:_DEBUG)?|"
+              r"CONFIG_KPM|"
+              r"CONFIG_KALLSYMS(?:_ALL)?|"
+              r"CONFIG_KSU_SUSFS(?:_[A-Z0-9_]+)?"
+              r")\s+is not set\s*$"
+          )
 
-          kept = []
-          for line in path.read_text().splitlines():
-              match = re.match(r"^\s*(CONFIG_[A-Z0-9_]+)=", line)
-              if not match:
-                  match = re.match(
-                      r"^\s*#\s*(CONFIG_[A-Z0-9_]+)\s+is not set\s*$",
-                      line,
-                  )
-              if match and match.group(1) in managed:
-                  continue
-              kept.append(line)
-
-          path.write_text("\n".join(kept).rstrip() + "\n")
+          lines = path.read_text().splitlines()
+          lines = [
+              line for line in lines
+              if not pattern.match(line) and not not_set.match(line)
+          ]
+          path.write_text("\n".join(lines).rstrip() + "\n")
           PY
 
           cat >> "$CFG" <<'EOF'
 
-          # SukiSU + SUSFS v1.5.7
+          # SukiSU + SUSFS v2.3.0
           CONFIG_KSU=y
           # CONFIG_KSU_DEBUG is not set
 
@@ -378,38 +453,34 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_KSTAT=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
 
-          # Disable diagnostic logging; this is not a hiding feature.
-          # CONFIG_KSU_SUSFS_ENABLE_LOG is not set
-
-          # Keep KPM and symbol tables enabled.
+          # Keep SukiSU KPM enabled.
           CONFIG_KPM=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
           EOF
 
-          echo "Checking requested configuration..."
-          grep -nE '^(CONFIG_KPM=|CONFIG_KALLSYMS=|CONFIG_KALLSYMS_ALL=|CONFIG_KSU_SUSFS)' "$CFG"
-
-          grep -qx 'CONFIG_KPM=y' "$CFG"
-          grep -qx 'CONFIG_KALLSYMS=y' "$CFG"
-          grep -qx 'CONFIG_KALLSYMS_ALL=y' "$CFG"
           grep -qx 'CONFIG_KSU=y' "$CFG"
           grep -qx 'CONFIG_KSU_SUSFS=y' "$CFG"
           grep -qx 'CONFIG_KSU_SUSFS_SUS_PATH=y' "$CFG"
           grep -qx 'CONFIG_KSU_SUSFS_SUS_MOUNT=y' "$CFG"
           grep -qx 'CONFIG_KSU_SUSFS_SUS_KSTAT=y' "$CFG"
           grep -qx 'CONFIG_KSU_SUSFS_SPOOF_UNAME=y' "$CFG"
+          grep -qx 'CONFIG_KSU_SUSFS_ENABLE_LOG=y' "$CFG"
           grep -qx 'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y' "$CFG"
           grep -qx 'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y' "$CFG"
           grep -qx 'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y' "$CFG"
           grep -qx 'CONFIG_KSU_SUSFS_SUS_MAP=y' "$CFG"
+          grep -qx 'CONFIG_KPM=y' "$CFG"
+          grep -qx 'CONFIG_KALLSYMS=y' "$CFG"
+          grep -qx 'CONFIG_KALLSYMS_ALL=y' "$CFG"
 
-          echo "SUSFS v1.5.7 and KPM configuration checks passed."
+          echo "SUSFS v2.3.0 and KPM config verified."
 
       - name: Build kernel
         uses: ./.github/workflows/build-process
