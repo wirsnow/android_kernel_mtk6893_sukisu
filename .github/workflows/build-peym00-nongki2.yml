@@ -402,6 +402,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/device_kernel"
 
           python3 - <<'PY'
+          import re
           from pathlib import Path
 
           path = Path("fs/notify/fdinfo.c")
@@ -409,35 +410,77 @@ jobs:
               raise SystemExit("ERROR: fdinfo.c not found")
 
           text = path.read_text()
+
+          # Restrict the change to inotify_fdinfo(), not fanotify.
+          start = text.find("static void inotify_fdinfo(")
+          end = text.find("void inotify_show_fdinfo", start)
+
+          if start < 0 or end < 0:
+              raise SystemExit(
+                  "ERROR: could not isolate inotify_fdinfo()"
+              )
+
+          func = text[start:end]
           old = "mask, mark->ignored_mask);"
           new = "mark->mask & IN_ALL_EVENTS, mark->ignored_mask);"
 
-          count = text.count(old)
-
-          if count > 2:
-              raise SystemExit(
-                  f"ERROR: unexpected fdinfo.c layout: {count} old references"
-              )
+          count = func.count(old)
 
           if count:
-              text = text.replace(old, new)
-              path.write_text(text)
-              print(f"Fixed {count} stale mask reference(s).")
-          elif new in text:
-              print("The fdinfo mask fix is already present.")
-          else:
-              raise SystemExit(
-                  "ERROR: expected mask reference not found; "
-                  "inspect fdinfo.c before proceeding."
+              func = func.replace(old, new)
+
+              # Remove the old declaration if no longer needed.
+              func, removed = re.subn(
+                  r"(?m)^[ \t]*u32 mask = mark->mask & IN_ALL_EVENTS;[ \t]*\n",
+                  "",
+                  func,
               )
 
+              text = text[:start] + func + text[end:]
+              path.write_text(text)
+
+              print(
+                  f"Fixed {count} inotify reference(s); "
+                  f"removed {removed} obsolete declaration(s)."
+              )
+          elif new in func:
+              print("inotify_fdinfo() fix is already present.")
+          else:
+              raise SystemExit(
+                  "ERROR: no expected stale mask reference "
+                  "inside inotify_fdinfo()."
+              )
+
+          # Verify the result.
           text = path.read_text()
-          if old in text:
-              raise SystemExit("ERROR: stale mask reference remains.")
+          start = text.find("static void inotify_fdinfo(")
+          end = text.find("void inotify_show_fdinfo", start)
+          func = text[start:end]
 
-          print("fdinfo.c mask compatibility check passed.")
+          if old in func:
+              raise SystemExit(
+                  "ERROR: stale inotify mask reference remains."
+              )
+
+          if new not in func:
+              raise SystemExit(
+                  "ERROR: inotify mask replacement did not verify."
+              )
+
+          # Verify fanotify's mark->mask expression was not damaged.
+          fan_start = text.find("static void fanotify_fdinfo(")
+          if fan_start >= 0:
+              if (
+                  "mark->mask, mark->ignored_mask);"
+                  not in text[fan_start:]
+              ):
+                  raise SystemExit(
+                      "ERROR: fanotify code appears changed unexpectedly."
+                  )
+
+          print("fdinfo.c inotify-only mask compatibility check passed.")
           PY
-
+          
       # Verify the Linux 4.19 hook patch already present in your kernel repo.
       - name: Verify PEYM00 SukiSU hooks
         shell: bash
