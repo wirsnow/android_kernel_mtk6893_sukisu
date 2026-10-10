@@ -297,88 +297,6 @@ jobs:
           ! grep -nE 'access_ok\((arg1|arg2|cmd\.control_code|cmd\.result_code),' "$KPM_C"
           echo "KPM access_ok checks adapted for Linux 4.19."
           
-      - name: Inline SUSFS current-app UID checks for Linux 4.19
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/device_kernel"
-
-          python3 - <<'PY'
-          import re
-          from pathlib import Path
-
-          files = (
-              Path("fs/notify/fdinfo.c"),
-              Path("fs/proc/fd.c"),
-              Path("fs/stat.c"),
-              Path("fs/statfs.c"),
-          )
-
-          old = "susfs_is_current_app_uid()"
-          new = "((__kuid_val(current_uid()) % 100000) >= 10000)"
-
-          changed = 0
-          verified = 0
-
-          for path in files:
-              if not path.is_file():
-                  raise SystemExit(f"ERROR: missing file: {path}")
-
-              text = path.read_text()
-              count = text.count(old)
-
-              if count:
-                  text = text.replace(old, new)
-                  changed += count
-
-                  # current_uid() and __kuid_val() declarations
-                  # are provided by the kernel credentials header.
-                  if "#include <linux/cred.h>" not in text:
-                      lines = text.splitlines(keepends=True)
-                      idx = next(
-                          (
-                              i for i, line in enumerate(lines)
-                              if re.match(
-                                  r"^\s*#include\s+<linux/[^>]+>",
-                                  line
-                              )
-                          ),
-                          None,
-                      )
-
-                      if idx is None:
-                          raise SystemExit(
-                              f"ERROR: no Linux include anchor in {path}"
-                          )
-
-                      lines.insert(idx + 1, "#include <linux/cred.h>\n")
-                      text = "".join(lines)
-
-                  path.write_text(text)
-
-              # Verify every expected call site no longer references
-              # the unresolved helper.
-              result = path.read_text()
-
-              if old in result:
-                  raise SystemExit(
-                      f"ERROR: unresolved helper call remains in {path}"
-                  )
-
-              if new not in result:
-                  raise SystemExit(
-                      f"ERROR: UID expression missing from {path}"
-                  )
-
-              verified += 1
-
-          if verified != len(files):
-              raise SystemExit("ERROR: not all SUSFS call sites verified")
-
-          print(f"Replaced {changed} SUSFS UID helper call(s).")
-          print("All four Linux 4.19 SUSFS UID call sites verified.")
-          PY
-          
       - name: Upgrade SUSFS core to v2.3.0 for SukiSU
         shell: bash
         run: |
@@ -853,6 +771,91 @@ jobs:
               raise SystemExit("ERROR: SELinux compatibility guards missing")
 
           print("SUSFS/SukiSU Linux 4.19 linker compatibility checks passed.")
+          PY
+
+      - name: Inline SUSFS current-app UID checks for Linux 4.19
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/device_kernel"
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          files = (
+              Path("fs/notify/fdinfo.c"),
+              Path("fs/proc/fd.c"),
+              Path("fs/stat.c"),
+              Path("fs/statfs.c"),
+          )
+
+          old = "susfs_is_current_app_uid()"
+          new = "((__kuid_val(current_uid()) % 100000) >= 10000)"
+
+          changed = 0
+          stat_changed = 0
+
+          for path in files:
+              if not path.is_file():
+                  raise SystemExit(f"ERROR: missing file: {path}")
+
+              text = path.read_text()
+              count = text.count(old)
+
+              if count:
+                  text = text.replace(old, new)
+                  changed += count
+
+                  if path == Path("fs/stat.c"):
+                      stat_changed += count
+
+                  if "#include <linux/cred.h>" not in text:
+                      lines = text.splitlines(keepends=True)
+                      idx = next(
+                          (
+                              i for i, line in enumerate(lines)
+                              if re.match(
+                                  r"^\s*#include\s+<linux/[^>]+>",
+                                  line
+                              )
+                          ),
+                          None,
+                      )
+
+                      if idx is None:
+                          raise SystemExit(
+                              f"ERROR: no Linux include anchor in {path}"
+                          )
+
+                      lines.insert(idx + 1, "#include <linux/cred.h>\n")
+                      text = "".join(lines)
+
+                  path.write_text(text)
+
+              result = path.read_text()
+
+              if old in result:
+                  raise SystemExit(
+                      f"ERROR: unresolved helper call remains in {path}"
+                  )
+
+              print(f"Verified {path}: replaced {count} call(s).")
+
+          if stat_changed == 0:
+              raise SystemExit(
+                  "ERROR: no UID call replaced in fs/stat.c. "
+                  "Check SUSFS patch application and step order."
+              )
+
+          if changed == 0:
+              raise SystemExit(
+                  "ERROR: no UID calls replaced. "
+                  "Ensure this step runs after SUSFS v2.3.0 integration."
+              )
+
+          print(f"Replaced {changed} SUSFS UID helper call(s).")
+          print("SUSFS current-app UID compatibility check passed.")
           PY
           
       # Verify required SukiSU hooks for the Linux 4.19 kernel.
