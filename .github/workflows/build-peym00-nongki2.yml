@@ -773,7 +773,7 @@ jobs:
           print("SUSFS/SukiSU Linux 4.19 linker compatibility checks passed.")
           PY
           
-      # Verify the Linux 4.19 hook patch already present in your kernel repo.
+      # Verify required SukiSU hooks for the Linux 4.19 kernel.
       - name: Verify PEYM00 SukiSU hooks
         shell: bash
         run: |
@@ -787,9 +787,17 @@ jobs:
           grep -q 'ksu_handle_sys_read' fs/read_write.c
           grep -q 'ksu_handle_stat' fs/stat.c
           grep -q 'ksu_handle_input_handle_event' drivers/input/input.c
-          grep -q 'ksu_handle_devpts' drivers/tty/pty.c
 
-          echo "All required SukiSU hooks are already present."
+          # The legacy devpts callback is intentionally removed
+          # by the Linux 4.19 compatibility fix.
+          if grep -q 'ksu_handle_devpts' drivers/tty/pty.c; then
+            echo "ERROR: obsolete ksu_handle_devpts reference remains."
+            exit 1
+          fi
+
+          echo "Required SukiSU hooks verified."
+          echo "Legacy devpts callback removal verified."
+
 
       # Enable the SUSFS options without applying a second SUSFS core patch.
      
