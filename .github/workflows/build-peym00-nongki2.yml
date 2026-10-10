@@ -395,6 +395,50 @@ jobs:
 
           echo "SUSFS v2.3.0 core and SukiSU hooks verified."
 
+      - name: Fix SUSFS fdinfo mask compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/device_kernel"
+
+          FDINFO="fs/notify/fdinfo.c"
+          test -f "$FDINFO"
+
+          python3 - "$FDINFO" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          old = "mask, mark->ignored_mask);"
+          new = "mark->mask & IN_ALL_EVENTS, mark->ignored_mask);"
+
+          count = text.count(old)
+
+          if count == 1:
+              text = text.replace(old, new, 1)
+              path.write_text(text)
+              print("Fixed fdinfo.c undeclared mask reference.")
+          elif count == 0 and new in text:
+              print("fdinfo.c compatibility fix already present.")
+          else:
+              raise SystemExit(
+                  "ERROR: unexpected fdinfo.c layout; "
+                  f"found {count} old mask references."
+              )
+
+          text = path.read_text()
+
+          if old in text:
+              raise SystemExit("ERROR: old mask reference still exists.")
+
+          if new not in text:
+              raise SystemExit("ERROR: replacement verification failed.")
+
+          print("fdinfo.c mask compatibility verified.")
+          PY
+
       # Verify the Linux 4.19 hook patch already present in your kernel repo.
       - name: Verify PEYM00 SukiSU hooks
         shell: bash
