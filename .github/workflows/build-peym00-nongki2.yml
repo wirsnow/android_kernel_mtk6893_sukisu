@@ -395,48 +395,47 @@ jobs:
 
           echo "SUSFS v2.3.0 core and SukiSU hooks verified."
 
-      - name: Fix SUSFS fdinfo mask compatibility
+      - name: Fix SUSFS fdinfo mask build error
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/device_kernel"
 
-          FDINFO="fs/notify/fdinfo.c"
-          test -f "$FDINFO"
-
-          python3 - "$FDINFO" <<'PY'
-          import sys
+          python3 - <<'PY'
           from pathlib import Path
 
-          path = Path(sys.argv[1])
-          text = path.read_text()
+          path = Path("fs/notify/fdinfo.c")
+          if not path.is_file():
+              raise SystemExit("ERROR: fdinfo.c not found")
 
+          text = path.read_text()
           old = "mask, mark->ignored_mask);"
           new = "mark->mask & IN_ALL_EVENTS, mark->ignored_mask);"
 
           count = text.count(old)
 
-          if count == 1:
-              text = text.replace(old, new, 1)
+          if count > 2:
+              raise SystemExit(
+                  f"ERROR: unexpected fdinfo.c layout: {count} old references"
+              )
+
+          if count:
+              text = text.replace(old, new)
               path.write_text(text)
-              print("Fixed fdinfo.c undeclared mask reference.")
-          elif count == 0 and new in text:
-              print("fdinfo.c compatibility fix already present.")
+              print(f"Fixed {count} stale mask reference(s).")
+          elif new in text:
+              print("The fdinfo mask fix is already present.")
           else:
               raise SystemExit(
-                  "ERROR: unexpected fdinfo.c layout; "
-                  f"found {count} old mask references."
+                  "ERROR: expected mask reference not found; "
+                  "inspect fdinfo.c before proceeding."
               )
 
           text = path.read_text()
-
           if old in text:
-              raise SystemExit("ERROR: old mask reference still exists.")
+              raise SystemExit("ERROR: stale mask reference remains.")
 
-          if new not in text:
-              raise SystemExit("ERROR: replacement verification failed.")
-
-          print("fdinfo.c mask compatibility verified.")
+          print("fdinfo.c mask compatibility check passed.")
           PY
 
       # Verify the Linux 4.19 hook patch already present in your kernel repo.
