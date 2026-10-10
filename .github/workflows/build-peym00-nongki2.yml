@@ -317,9 +317,25 @@ jobs:
           rm -rf susfs4ksu
 
           # Revert v1.5.7 first, then its original SUSFS integration.
-          git revert --no-commit \
+          # Revert v1.5.7 first, then its original SUSFS integration.
+          # Resolve overlapping hunks in favor of the SUSFS removal.
+          if ! git revert --no-commit -X theirs \
             f8ed6712823b7535346d8a05e898555b548fc9ac \
-            8816588aef937a14d9af639b1c75450bcdb24f6f
+            8816588aef937a14d9af639b1c75450bcdb24f6f; then
+            echo "ERROR: failed to revert old SUSFS integration."
+            git status --short
+            git ls-files -u || true
+            git revert --abort || true
+            exit 1
+          fi
+          
+          # Fail explicitly if any unresolved index conflicts remain.
+          if git ls-files -u | grep -q .; then
+            echo "ERROR: unresolved conflicts remain."
+            git status --short
+            git ls-files -u
+            exit 1
+          fi
 
           test ! -e fs/susfs.c
           test ! -e include/linux/susfs.h
